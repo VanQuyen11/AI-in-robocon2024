@@ -1,0 +1,57 @@
+# The build-stage image:
+FROM condaforge/mambaforge AS build
+
+# Install the package as normal:
+COPY environment_jetson.yml .
+RUN mamba env create -f environment_jetson.yml
+
+# Install conda-pack:
+RUN mamba install -c conda-forge conda-pack
+
+# Use conda-pack to create a standalone enviornment
+# in /venv:
+RUN conda-pack --ignore-missing-files -n yolov8_onnx -o /tmp/env.tar && \
+  mkdir /venv && cd /venv && tar xf /tmp/env.tar && \
+  rm /tmp/env.tar
+
+# We've put venv in same path it'll be in final image,
+# so now fix up paths:
+RUN /venv/bin/conda-unpack
+
+
+# The runtime-stage image; we can use Debian as the
+# base image since the Conda env also includes Python
+# for us.
+FROM nvcr.io/nvidia/l4t-base:r32.4.3 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install common OS level dependencies
+RUN apt-get update && apt-get -y install ffmpeg libsm6 libxext6
+
+RUN apt-get update && \
+    apt-get install -y rsync && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy /venv from the previous stage
+COPY --from=build /venv /venv
+
+# Copy weights /code/weights
+COPY weights /code/weights
+
+# Then copy the rest of the code
+RUN --mount=target=/ctx rsync -r --exclude='weights' /ctx/ /code/
+
+WORKDIR /code/
+
+# install onnxruntime-gpu 1.11.0 from Jetson zoo
+ADD https://nvidia.box.com/shared/static/2sv2fv1wseihaw8ym0d4srz41dzljwxh.whl onnxruntime_gpu-1.11.0-cp38-cp38-linux_aarch64.whl
+
+RUN /bin/bash -c "source /venv/bin/activate && pip install onnxruntime_gpu-1.11.0-cp38-cp38-linux_aarch64.whl && rm *.whl"
+
+# When image is run, run the code with the environment
+# activated:
+# SHELL ["/bin/bash", "-c"]
+
+# ENTRYPOINT source /venv/bin/activate && \
+#            python webcam_object_detection.py
